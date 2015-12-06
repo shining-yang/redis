@@ -3023,6 +3023,7 @@ void sentinelCommand(client *c) {
             addReply(c,shared.ok);
         }
     } else if (!strcasecmp(c->argv[1]->ptr,"flushconfig")) {
+        if (c->argc != 2) goto numargserr;
         sentinelFlushConfig();
         addReply(c,shared.ok);
         return;
@@ -3030,6 +3031,7 @@ void sentinelCommand(client *c) {
         /* SENTINEL REMOVE <name> */
         sentinelRedisInstance *ri;
 
+        if (c->argc != 3) goto numargserr;
         if ((ri = sentinelGetMasterByNameOrReplyError(c,c->argv[2]))
             == NULL) return;
         sentinelEvent(LL_WARNING,"-monitor",ri,"%@");
@@ -3041,6 +3043,7 @@ void sentinelCommand(client *c) {
         sentinelRedisInstance *ri;
         int usable;
 
+        if (c->argc != 3) goto numargserr;
         if ((ri = sentinelGetMasterByNameOrReplyError(c,c->argv[2]))
             == NULL) return;
         int result = sentinelIsQuorumReachable(ri,&usable);

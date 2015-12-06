@@ -218,8 +218,9 @@ void stopAppendOnly(void) {
 
         serverLog(LL_NOTICE,"Killing running AOF rewrite child: %ld",
             (long) server.aof_child_pid);
-        if (kill(server.aof_child_pid,SIGUSR1) != -1)
-            wait3(&statloc,0,NULL);
+        if (kill(server.aof_child_pid,SIGUSR1) != -1) {
+            while(wait3(&statloc,0,NULL) != server.aof_child_pid);
+        }
         /* reset the buffer accumulating changes while the child saves */
         aofRewriteBufferReset();
         aofRemoveTempFile(server.aof_child_pid);
@@ -826,7 +827,7 @@ int rewriteSetObject(rio *r, robj *key, robj *o) {
         dictEntry *de;
 
         while((de = dictNext(di)) != NULL) {
-            robj *eleobj = dictGetKey(de);
+            sds ele = dictGetKey(de);
             if (count == 0) {
                 int cmd_items = (items > AOF_REWRITE_ITEMS_PER_CMD) ?
                     AOF_REWRITE_ITEMS_PER_CMD : items;
@@ -835,7 +836,7 @@ int rewriteSetObject(rio *r, robj *key, robj *o) {
                 if (rioWriteBulkString(r,"SADD",4) == 0) return 0;
                 if (rioWriteBulkObject(r,key) == 0) return 0;
             }
-            if (rioWriteBulkObject(r,eleobj) == 0) return 0;
+            if (rioWriteBulkString(r,ele,sdslen(ele)) == 0) return 0;
             if (++count == AOF_REWRITE_ITEMS_PER_CMD) count = 0;
             items--;
         }
@@ -892,7 +893,7 @@ int rewriteSortedSetObject(rio *r, robj *key, robj *o) {
         dictEntry *de;
 
         while((de = dictNext(di)) != NULL) {
-            robj *eleobj = dictGetKey(de);
+            sds ele = dictGetKey(de);
             double *score = dictGetVal(de);
 
             if (count == 0) {
@@ -904,7 +905,7 @@ int rewriteSortedSetObject(rio *r, robj *key, robj *o) {
                 if (rioWriteBulkObject(r,key) == 0) return 0;
             }
             if (rioWriteBulkDouble(r,*score) == 0) return 0;
-            if (rioWriteBulkObject(r,eleobj) == 0) return 0;
+            if (rioWriteBulkString(r,ele,sdslen(ele)) == 0) return 0;
             if (++count == AOF_REWRITE_ITEMS_PER_CMD) count = 0;
             items--;
         }
@@ -928,17 +929,13 @@ static int rioWriteHashIteratorCursor(rio *r, hashTypeIterator *hi, int what) {
         long long vll = LLONG_MAX;
 
         hashTypeCurrentFromZiplist(hi, what, &vstr, &vlen, &vll);
-        if (vstr) {
+        if (vstr)
             return rioWriteBulkString(r, (char*)vstr, vlen);
-        } else {
+        else
             return rioWriteBulkLongLong(r, vll);
-        }
-
     } else if (hi->encoding == OBJ_ENCODING_HT) {
-        robj *value;
-
-        hashTypeCurrentFromHashTable(hi, what, &value);
-        return rioWriteBulkObject(r, value);
+        sds value = hashTypeCurrentFromHashTable(hi, what);
+        return rioWriteBulkString(r, value, sdslen(value));
     }
 
     serverPanic("Unknown hash encoding");
@@ -1459,8 +1456,10 @@ void backgroundRewriteDoneHandler(int exitcode, int bysignal) {
         serverLog(LL_VERBOSE,
             "Background AOF rewrite signal handler took %lldus", ustime()-now);
     } else if (!bysignal && exitcode != 0) {
-        server.aof_lastbgrewrite_status = C_ERR;
-
+        /* SIGUSR1 is whitelisted, so we have a way to kill a child without
+         * tirggering an error conditon. */
+        if (bysignal != SIGUSR1)
+            server.aof_lastbgrewrite_status = C_ERR;
         serverLog(LL_WARNING,
             "Background AOF rewrite terminated with error");
     } else {

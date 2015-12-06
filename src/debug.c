@@ -163,10 +163,10 @@ void computeDatasetDigest(unsigned char *final) {
                 listTypeReleaseIterator(li);
             } else if (o->type == OBJ_SET) {
                 setTypeIterator *si = setTypeInitIterator(o);
-                robj *ele;
-                while((ele = setTypeNextObject(si)) != NULL) {
-                    xorObjectDigest(digest,ele);
-                    decrRefCount(ele);
+                sds sdsele;
+                while((sdsele = setTypeNextObject(si)) != NULL) {
+                    xorDigest(digest,sdsele,sdslen(sdsele));
+                    sdsfree(sdsele);
                 }
                 setTypeReleaseIterator(si);
             } else if (o->type == OBJ_ZSET) {
@@ -208,12 +208,12 @@ void computeDatasetDigest(unsigned char *final) {
                     dictEntry *de;
 
                     while((de = dictNext(di)) != NULL) {
-                        robj *eleobj = dictGetKey(de);
+                        sds sdsele = dictGetKey(de);
                         double *score = dictGetVal(de);
 
                         snprintf(buf,sizeof(buf),"%.17g",*score);
                         memset(eledigest,0,20);
-                        mixObjectDigest(eledigest,eleobj);
+                        mixDigest(eledigest,sdsele,sdslen(sdsele));
                         mixDigest(eledigest,buf,strlen(buf));
                         xorDigest(digest,eledigest,20);
                     }
@@ -222,20 +222,18 @@ void computeDatasetDigest(unsigned char *final) {
                     serverPanic("Unknown sorted set encoding");
                 }
             } else if (o->type == OBJ_HASH) {
-                hashTypeIterator *hi;
-                robj *obj;
-
-                hi = hashTypeInitIterator(o);
+                hashTypeIterator *hi = hashTypeInitIterator(o);
                 while (hashTypeNext(hi) != C_ERR) {
                     unsigned char eledigest[20];
+                    sds sdsele;
 
                     memset(eledigest,0,20);
-                    obj = hashTypeCurrentObject(hi,OBJ_HASH_KEY);
-                    mixObjectDigest(eledigest,obj);
-                    decrRefCount(obj);
-                    obj = hashTypeCurrentObject(hi,OBJ_HASH_VALUE);
-                    mixObjectDigest(eledigest,obj);
-                    decrRefCount(obj);
+                    sdsele = hashTypeCurrentObjectNewSds(hi,OBJ_HASH_KEY);
+                    mixDigest(eledigest,sdsele,sdslen(sdsele));
+                    sdsfree(sdsele);
+                    sdsele = hashTypeCurrentObjectNewSds(hi,OBJ_HASH_VALUE);
+                    mixDigest(eledigest,sdsele,sdslen(sdsele));
+                    sdsfree(sdsele);
                     xorDigest(digest,eledigest,20);
                 }
                 hashTypeReleaseIterator(hi);
@@ -261,6 +259,20 @@ void inputCatSds(void *result, const char *str) {
 void debugCommand(client *c) {
     if (!strcasecmp(c->argv[1]->ptr,"segfault")) {
         *((char*)-1) = 'x';
+    } else if (!strcasecmp(c->argv[1]->ptr,"restart") ||
+               !strcasecmp(c->argv[1]->ptr,"crash-and-recover"))
+    {
+        long long delay = 0;
+        if (c->argc >= 3) {
+            if (getLongLongFromObjectOrReply(c, c->argv[2], &delay, NULL)
+                != C_OK) return;
+            if (delay < 0) delay = 0;
+        }
+        int flags = !strcasecmp(c->argv[1]->ptr,"restart") ?
+            (RESTART_SERVER_GRACEFULLY|RESTART_SERVER_CONFIG_REWRITE) :
+             RESTART_SERVER_NONE;
+        restartServer(flags,delay);
+        addReplyError(c,"failed to restart the server. Check server logs.");
     } else if (!strcasecmp(c->argv[1]->ptr,"oom")) {
         void *ptr = zmalloc(ULONG_MAX); /* Should trigger an out of memory. */
         zfree(ptr);
@@ -273,7 +285,7 @@ void debugCommand(client *c) {
             addReply(c,shared.err);
             return;
         }
-        emptyDb(NULL);
+        emptyDb(-1,EMPTYDB_NO_FLAGS,NULL);
         if (rdbLoad(server.rdb_filename) != C_OK) {
             addReplyError(c,"Error trying to load the RDB dump");
             return;
@@ -281,7 +293,8 @@ void debugCommand(client *c) {
         serverLog(LL_WARNING,"DB reloaded by DEBUG RELOAD");
         addReply(c,shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr,"loadaof")) {
-        emptyDb(NULL);
+        if (server.aof_state == AOF_ON) flushAppendOnlyFile(1);
+        emptyDb(-1,EMPTYDB_NO_FLAGS,NULL);
         if (loadAppendOnlyFile(server.aof_filename) != C_OK) {
             addReply(c,shared.err);
             return;
@@ -411,6 +424,11 @@ void debugCommand(client *c) {
     {
         server.active_expire_enabled = atoi(c->argv[2]->ptr);
         addReply(c,shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr,"lua-always-replicate-commands") &&
+               c->argc == 3)
+    {
+        server.lua_always_replicate_commands = atoi(c->argv[2]->ptr);
+        addReply(c,shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr,"error") && c->argc == 3) {
         sds errstr = sdsnewlen("-",1);
 
@@ -498,7 +516,7 @@ void _serverAssertPrintClientInfo(client *c) {
         if (c->argv[j]->type == OBJ_STRING && sdsEncodedObject(c->argv[j])) {
             arg = (char*) c->argv[j]->ptr;
         } else {
-            snprintf(buf,sizeof(buf),"Object type: %d, encoding: %d",
+            snprintf(buf,sizeof(buf),"Object type: %u, encoding: %u",
                 c->argv[j]->type, c->argv[j]->encoding);
             arg = buf;
         }

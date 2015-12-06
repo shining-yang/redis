@@ -495,7 +495,7 @@ void clusterReset(int hard) {
     if (nodeIsSlave(myself)) {
         clusterSetNodeAsMaster(myself);
         replicationUnsetMaster();
-        emptyDb(NULL);
+        emptyDb(-1,EMPTYDB_NO_FLAGS,NULL);
     }
 
     /* Close slots, reset manual failover state. */
@@ -2625,7 +2625,9 @@ void clusterLogCantFailover(int reason) {
 
     switch(reason) {
     case CLUSTER_CANT_FAILOVER_DATA_AGE:
-        msg = "Disconnected from master for longer than allowed.";
+        msg = "Disconnected from master for longer than allowed. "
+              "Please check the 'cluster-slave-validity-factor' configuration "
+              "option.";
         break;
     case CLUSTER_CANT_FAILOVER_WAITING_DELAY:
         msg = "Waiting the delay before I can start a new failover.";
@@ -4087,7 +4089,10 @@ void clusterCommand(client *c) {
         keys = zmalloc(sizeof(robj*)*maxkeys);
         numkeys = getKeysInSlot(slot, keys, maxkeys);
         addReplyMultiBulkLen(c,numkeys);
-        for (j = 0; j < numkeys; j++) addReplyBulk(c,keys[j]);
+        for (j = 0; j < numkeys; j++) {
+            addReplyBulk(c,keys[j]);
+            decrRefCount(keys[j]);
+        }
         zfree(keys);
     } else if (!strcasecmp(c->argv[1]->ptr,"forget") && c->argc == 3) {
         /* CLUSTER FORGET <NODE ID> */
